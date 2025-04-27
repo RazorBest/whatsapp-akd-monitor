@@ -529,9 +529,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut auditor = LocalAuditor::new(&audits_url, &log_directory);
 
     let (root_epoch, _) = root.split_once("/").unwrap();
-    // let curr_epoch = search_last_epoch(audits_url, root_epoch.parse::<u64>()?, max_expected_epoch)?;
-    // let mut curr_epoch = 1087069u64;
-    let mut curr_epoch = 537069u64;
+    let mut curr_epoch = search_last_epoch(&audits_url, root_epoch.parse::<u64>()?, max_expected_epoch)?;
 
     let end = curr_epoch - 11;
     while curr_epoch > end {
