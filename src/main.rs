@@ -64,7 +64,7 @@ impl LocalAuditor<'_> {
         }
     }
 
-    fn _get_meta_at_epoch_no_cache(&self, epoch: u64) -> Result<AuditInfo, Box<dyn Error>> {
+    fn _get_metadata_at_epoch_no_cache(&self, epoch: u64) -> Result<AuditInfo, Box<dyn Error>> {
         let url = format!("{}/{}", self.audits_url, epoch);
         let text = reqwest::blocking::get(&url)?.text()?;
         let data: Value = serde_json::from_str(&text)?;
@@ -80,9 +80,9 @@ impl LocalAuditor<'_> {
         })
     }
 
-    fn get_meta_at_epoch(&mut self, epoch: u64) -> Result<&AuditInfo, Box<dyn Error>> {
+    fn get_metadata_at_epoch(&mut self, epoch: u64) -> Result<&AuditInfo, Box<dyn Error>> {
         if !self.audits.contains_key(&epoch)  {
-            let audit_info = self._get_meta_at_epoch_no_cache(epoch)?;
+            let audit_info = self._get_metadata_at_epoch_no_cache(epoch)?;
             self.audits.insert(epoch, audit_info);
         }
 
@@ -90,9 +90,9 @@ impl LocalAuditor<'_> {
     }
 
     fn _get_audit_blob_at_epoch_no_cache(&mut self, epoch: u64) -> Result<AuditBlob, Box<dyn Error>> {
-        let curr_epoch = self.get_meta_at_epoch(epoch).unwrap();
+        let curr_epoch = self.get_metadata_at_epoch(epoch).unwrap();
         let curr_digest = curr_epoch.digest.clone();
-        let prev_epoch = self.get_meta_at_epoch(epoch - 1).unwrap();
+        let prev_epoch = self.get_metadata_at_epoch(epoch - 1).unwrap();
         let prev_digest = prev_epoch.digest.clone();
 
         // Reversed engineered by looking at https://d1tfr3x7n136ak.cloudfront.net/
@@ -547,7 +547,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         run_azks(epoch, prev_hash, curr_hash, local_proof, local_proof2, local_proof3, local_proof4);
 
-        let audit_meta = auditor.get_meta_at_epoch(curr_epoch)?;
+        let audit_metadata = auditor.get_metadata_at_epoch(curr_epoch)?;
 
         //println!("Timestamp: {}", audit_meta.timestamp);
         /*
