@@ -108,7 +108,7 @@ impl LocalAuditor<'_> {
             data: proof.into_iter().collect(),
         };
 
-        return Ok(audit_blob);
+        Ok(audit_blob)
     }
 
     fn get_audit_blob_at_epoch(&mut self, epoch: u64) -> Result<AuditBlob, Box<dyn Error>> {
@@ -186,7 +186,7 @@ impl AzksDb {
             _ => return Ok(None),
         };
 
-        return Ok(Some(node));
+        Ok(Some(node))
     }
 }
 
@@ -260,7 +260,7 @@ async fn check_tree_hashes<TC: Configuration>(azks_db: &AzksDb, proof: SingleApp
         }
     }
 
-    if values_hm.len() > 0 {
+    if values_hm.is_empty() {
         println!("There were still values");
         return Ok(false);
     }
@@ -280,17 +280,11 @@ async fn traverse_tree(azks_db: &AzksDb, node: TreeNode) -> Result<(), Box<dyn E
         println!("VLabel: {}", node_label);
         println!("VValue: {:?}", node.latest_node.hash);
 
-        match node.latest_node.left_child {
-            Some(next_label) => {
-                q.add(next_label)?;
-            },
-            _ => {},
+        if let Some(next_label) = node.latest_node.left_child {
+            q.add(next_label)?;
         }
-        match node.latest_node.right_child {
-            Some(next_label) => {
-                q.add(next_label)?;
-            }
-            _ => {},
+        if let Some(next_label) = node.latest_node.right_child {
+            q.add(next_label)?;
         }
     }
 
@@ -384,7 +378,7 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
                         //println!("Actual {:?}", found_key);
                     },
                     _ => {
-                        new_elems.push(&azks_elem);
+                        new_elems.push(azks_elem);
                     }
                 }
             },
@@ -475,19 +469,13 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
 
         let mut is_leaf = true;
 
-        match node.latest_node.left_child {
-            Some(next_label) => {
-                q.add(next_label)?;
-                is_leaf = false;
-            },
-            _ => {},
+        if let Some(next_label) = node.latest_node.left_child {
+            q.add(next_label)?;
+            is_leaf = false;
         }
-        match node.latest_node.right_child {
-            Some(next_label) => {
-                q.add(next_label)?;
-                is_leaf = false;
-            }
-            _ => {},
+        if let Some(next_label) = node.latest_node.right_child {
+            q.add(next_label)?;
+            is_leaf = false;
         }
 
         if is_leaf {
