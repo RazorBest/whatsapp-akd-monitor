@@ -21,6 +21,8 @@ use akd::tree_node::TreeNode;
 use akd::tree_node::TreeNodeWithPreviousValue;
 use akd::storage::types::DbRecord;
 
+const LOG_FILE: &str = "history_logs.txt";
+
 fn search_last_epoch(audits_url: &String, root_epoch: u64, max_epoch: u64) -> Result<u64, Box<dyn Error>> {
     let mut left_epoch = root_epoch;
     let mut right_epoch = max_epoch;
@@ -293,7 +295,6 @@ async fn traverse_tree(azks_db: &AzksDb, node: TreeNode) -> Result<(), Box<dyn E
 
 async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
                       proof: SingleAppendOnlyProof, proof2: SingleAppendOnlyProof,
-                      proof3: SingleAppendOnlyProof, proof4: SingleAppendOnlyProof,
                       ) -> Result<(), Box<dyn Error>> {
 
     let mut hm: HashMap<NodeLabel, &AzksValue> = HashMap::new();
@@ -305,26 +306,6 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
     }
 
     for azks_elem in &proof2.inserted {
-        hm.insert(azks_elem.label, &azks_elem.value);
-        hm2.insert(&azks_elem.value, azks_elem.label);
-    }
-
-    for azks_elem in &proof3.unchanged_nodes {
-        hm.insert(azks_elem.label, &azks_elem.value);
-        hm2.insert(&azks_elem.value, azks_elem.label);
-    }
-
-    for azks_elem in &proof3.inserted {
-        hm.insert(azks_elem.label, &azks_elem.value);
-        hm2.insert(&azks_elem.value, azks_elem.label);
-    }
-
-    for azks_elem in &proof4.unchanged_nodes {
-        hm.insert(azks_elem.label, &azks_elem.value);
-        hm2.insert(&azks_elem.value, azks_elem.label);
-    }
-
-    for azks_elem in &proof4.inserted {
         hm.insert(azks_elem.label, &azks_elem.value);
         hm2.insert(&azks_elem.value, azks_elem.label);
     }
@@ -493,14 +474,12 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
 
 fn run_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32], proof: SingleAppendOnlyProof,
             proof2: SingleAppendOnlyProof,
-            proof3: SingleAppendOnlyProof,
-            proof4: SingleAppendOnlyProof,
             ) {
     let _ = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(process_azks(epoch, prev_hash, curr_hash, proof, proof2, proof3, proof4));
+        .block_on(process_azks(epoch, prev_hash, curr_hash, proof, proof2));
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -539,13 +518,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let prev_audit_blob = auditor.get_audit_blob_at_epoch(curr_epoch - 1)?;
         let (_epoch, _prev_hash, _curr_hash, local_proof2) = prev_audit_blob.decode().map_err(|_e| "Error")?;
 
-        let audit_blob3 = auditor.get_audit_blob_at_epoch(curr_epoch - 2)?;
-        let (_, _, _, local_proof3) = audit_blob3.decode().map_err(|_e| "Error")?;
-
-        let audit_blob4 = auditor.get_audit_blob_at_epoch(curr_epoch - 3)?;
-        let (_, _, _, local_proof4) = audit_blob4.decode().map_err(|_e| "Error")?;
-
-        run_azks(epoch, prev_hash, curr_hash, local_proof, local_proof2, local_proof3, local_proof4);
+        run_azks(epoch, prev_hash, curr_hash, local_proof, local_proof2);
 
         let audit_metadata = auditor.get_metadata_at_epoch(curr_epoch)?;
 
