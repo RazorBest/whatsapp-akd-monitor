@@ -43,6 +43,7 @@ fn search_last_epoch(audits_url: &String, root_epoch: u64, max_epoch: u64) -> Re
 }
 
 
+#[derive(Clone)]
 struct AuditInfo {
     timestamp: u64,
     epoch: u64,
@@ -99,11 +100,20 @@ impl LocalAuditor<'_> {
 
         // Reversed engineered by looking at https://d1tfr3x7n136ak.cloudfront.net/
         let key_id = format!("{}/{}/{}", epoch, prev_digest, curr_digest);
-        let proof = reqwest::blocking::get(format!("{}/{}", self.log_directory, key_id))?.bytes()?;
+        let proof_url = format!("{}/{}", self.log_directory, key_id);
+        let proof = reqwest::blocking::get(&proof_url)?.bytes()?;
 
         println!("Proof length: {}", proof.len());
 
-        let blob_name = AuditBlobName::try_from(key_id.as_str()).map_err(|_e| "Error")?;
+        let blob_name = AuditBlobName::try_from(key_id.as_str()).map_err(|_e| "Failed building blob")?;
+        let blob_name = match AuditBlobName::try_from(key_id.as_str()) {
+            Ok(value) => value,
+            Err(e) => {
+                println!("Proof url: {}", &proof_url);
+                println!("Proof: {proof:?}");
+                return Err("Error parsing proof".into());
+            }
+        };
         
         let audit_blob = AuditBlob {
             name: blob_name,
@@ -190,6 +200,17 @@ impl AzksDb {
 
         Ok(Some(node))
     }
+}
+
+struct EpochComputedStats {
+    new_inserted_nodes_count: u64,
+    inserted_nodes_count: u64,
+    old_nodes_count: u64,
+}
+
+struct EpochStats {
+    computed: EpochComputedStats,
+    audit_info: AuditInfo,
 }
 
 async fn check_tree_hashes<TC: Configuration>(azks_db: &AzksDb, proof: SingleAppendOnlyProof) -> Result<bool, Box<dyn Error>> {
@@ -295,7 +316,7 @@ async fn traverse_tree(azks_db: &AzksDb, node: TreeNode) -> Result<(), Box<dyn E
 
 async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
                       proof: SingleAppendOnlyProof, proof2: SingleAppendOnlyProof,
-                      ) -> Result<(), Box<dyn Error>> {
+                      ) -> Result<EpochComputedStats, Box<dyn Error>> {
 
     let mut hm: HashMap<NodeLabel, &AzksValue> = HashMap::new();
     let mut hm2: HashMap<&AzksValue, NodeLabel> = HashMap::new();
@@ -308,6 +329,18 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
     for azks_elem in &proof2.inserted {
         hm.insert(azks_elem.label, &azks_elem.value);
         hm2.insert(&azks_elem.value, azks_elem.label);
+    }
+
+    for azks_elem in &proof.inserted {
+        if azks_elem.label.label_len != 256 {
+            println!("{}", azks_elem.label.label_len);
+        }
+        if hm.contains_key(&azks_elem.label) {
+            println!("Label present");
+        }
+        if hm2.contains_key(&azks_elem.value) {
+            //println!("Value present");
+        }
     }
 
     /*
@@ -368,7 +401,11 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
 
     println!("New elements: {}", new_elems.len());
 
-    return Ok(());
+    return Ok(EpochComputedStats {
+        new_inserted_nodes_count: new_elems.len() as u64,
+        inserted_nodes_count: proof.inserted.len() as u64,
+        old_nodes_count: proof.unchanged_nodes.len() as u64,
+    });
 
     type TC = akd::WhatsAppV1Configuration;
     let mut azks_db = AzksDb::new::<TC>().await?;
@@ -468,18 +505,20 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
 
     println!("Root: {:?}", root);
 
-    Ok(())
+    Ok(EpochComputedStats {new_inserted_nodes_count: 0, inserted_nodes_count: 0, old_nodes_count: 0})
 }
 
 
 fn run_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32], proof: SingleAppendOnlyProof,
             proof2: SingleAppendOnlyProof,
-            ) {
-    let _ = tokio::runtime::Builder::new_current_thread()
+            ) -> Result<EpochComputedStats, Box<dyn Error>> {
+    let result = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(process_azks(epoch, prev_hash, curr_hash, proof, proof2));
+
+    result
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -509,6 +548,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let (root_epoch, _) = root.split_once("/").unwrap();
     let mut curr_epoch = search_last_epoch(&audits_url, root_epoch.parse::<u64>()?, max_expected_epoch)?;
+    // It takes some time for the proofs to be uploaded, so don't check really the last epochs
+    curr_epoch -= 2;
+
+    let mut stats = vec![];
 
     let end = curr_epoch - 11;
     while curr_epoch > end {
@@ -518,9 +561,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let prev_audit_blob = auditor.get_audit_blob_at_epoch(curr_epoch - 1)?;
         let (_epoch, _prev_hash, _curr_hash, local_proof2) = prev_audit_blob.decode().map_err(|_e| "Error")?;
 
-        run_azks(epoch, prev_hash, curr_hash, local_proof, local_proof2);
+        let computed_stats = run_azks(epoch, prev_hash, curr_hash, local_proof, local_proof2)?;
 
         let audit_metadata = auditor.get_metadata_at_epoch(curr_epoch)?;
+
+        stats.push(EpochStats {computed: computed_stats, audit_info: audit_metadata.clone()});
 
         //println!("Timestamp: {}", audit_meta.timestamp);
         /*
