@@ -4,8 +4,11 @@ use queues::*;
 
 use std::error::Error;
 use std::collections::HashMap;
-use rand::prelude::*;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value};
 //use plexi_core::deserialize_signature_response;
 
@@ -22,6 +25,8 @@ use akd::tree_node::TreeNodeWithPreviousValue;
 use akd::storage::types::DbRecord;
 
 const LOG_FILE: &str = "history_logs.txt";
+const PROOFS_STORE_DIR: &str = "stored_proofs";
+const PROOFS_META_FILE: &str = "data.json";
 
 fn search_last_epoch(audits_url: &String, root_epoch: u64, max_epoch: u64) -> Result<u64, Box<dyn Error>> {
     let mut left_epoch = root_epoch;
@@ -42,6 +47,75 @@ fn search_last_epoch(audits_url: &String, root_epoch: u64, max_epoch: u64) -> Re
     Ok(left_epoch)
 }
 
+#[derive(Serialize, Deserialize)]
+struct ProofMeta {
+    epoch: u64,
+    previous_hash: [u8; 32],
+    current_hash: [u8; 32],
+}
+
+impl ProofMeta {
+    fn from_audit_blob(audit_blob: &AuditBlob) -> Self {
+        return Self{
+            epoch: audit_blob.name.epoch,
+            previous_hash: audit_blob.name.previous_hash,
+            current_hash: audit_blob.name.current_hash,
+        };
+    }
+}
+
+struct ProofStorage {
+    proofs_info: Option<HashMap<u64, ProofMeta>>,
+}
+
+impl ProofStorage {
+    fn read_storage_meta(&mut self) -> Result<HashMap<u64, ProofMeta>, Box<dyn Error>> {
+        let info_path = Path::new(PROOFS_STORE_DIR).join(PROOFS_META_FILE);
+        let text = fs::read_to_string(info_path)?;
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    fn new() -> Self {
+        return Self{proofs_info: None};
+    }
+
+    fn get_proofs_info(&mut self) -> &mut HashMap<u64, ProofMeta> {
+        if self.proofs_info.is_none() {
+            self.proofs_info = Some(self.read_storage_meta().unwrap_or_default())
+        }
+
+        return self.proofs_info.as_mut().unwrap();
+    }
+
+    fn store_proofs_info(&mut self) -> Result<(), Box<dyn Error>> {
+        let info_path = Path::new(PROOFS_STORE_DIR).join(PROOFS_META_FILE);
+        let text = serde_json::to_string(self.get_proofs_info()).unwrap();
+        fs::write(info_path, text)?;
+        Ok(())
+    }
+
+    fn stored_file_name_for_audit_proof(&self, epoch: u64) -> String{
+        return format!("proof_wt_{}", epoch);
+    }
+
+    fn store_audit_blob(&mut self, audit_blob: &AuditBlob) -> Result<(), Box<dyn Error>> {
+        let epoch = audit_blob.name.epoch;
+        let _ = fs::create_dir_all(PROOFS_STORE_DIR);
+        let file_name = self.stored_file_name_for_audit_proof(epoch);
+        let file_path = Path::new(PROOFS_STORE_DIR).join(file_name);
+        let mut store_file = fs::File::create(file_path)?;
+        let _ = store_file.write_all(&audit_blob.data);
+
+
+        let proof_info = ProofMeta::from_audit_blob(audit_blob);
+        let proofs_info = self.get_proofs_info();
+        proofs_info.insert(epoch, proof_info);
+        self.store_proofs_info()?;
+
+        Ok(())
+    }
+}
+
 
 #[derive(Clone)]
 struct AuditInfo {
@@ -55,6 +129,7 @@ struct LocalAuditor<'a> {
     log_directory: &'a String,
     audits: HashMap<u64, AuditInfo>,
     proofs: HashMap<u64, AuditBlob>,
+    proof_storage: ProofStorage,
 }
 
 impl LocalAuditor<'_> {
@@ -63,7 +138,8 @@ impl LocalAuditor<'_> {
             audits_url,
             log_directory,
             audits: HashMap::new(),
-            proofs: HashMap::new()
+            proofs: HashMap::new(),
+            proof_storage: ProofStorage::new(),
         }
     }
 
@@ -92,14 +168,14 @@ impl LocalAuditor<'_> {
         Ok(self.audits.get(&epoch).unwrap())
     }
 
-    fn _get_audit_blob_at_epoch_no_cache(&mut self, epoch: u64) -> Result<AuditBlob, Box<dyn Error>> {
+    fn _get_audit_blob_at_epoch_from_internet(&mut self, epoch: u64) -> Result<AuditBlob, Box<dyn Error>> {
         let curr_epoch = self.get_metadata_at_epoch(epoch).unwrap();
-        let curr_digest = curr_epoch.digest.clone();
+        let current_hash = curr_epoch.digest.clone();
         let prev_epoch = self.get_metadata_at_epoch(epoch - 1).unwrap();
-        let prev_digest = prev_epoch.digest.clone();
+        let previous_hash = prev_epoch.digest.clone();
 
         // Reversed engineered by looking at https://d1tfr3x7n136ak.cloudfront.net/
-        let key_id = format!("{}/{}/{}", epoch, prev_digest, curr_digest);
+        let key_id = format!("{}/{}/{}", epoch, previous_hash, current_hash);
         let proof_url = format!("{}/{}", self.log_directory, key_id);
         let proof = reqwest::blocking::get(&proof_url)?.bytes()?;
 
@@ -108,7 +184,7 @@ impl LocalAuditor<'_> {
         let blob_name = AuditBlobName::try_from(key_id.as_str()).map_err(|_e| "Failed building blob")?;
         let blob_name = match AuditBlobName::try_from(key_id.as_str()) {
             Ok(value) => value,
-            Err(e) => {
+            Err(_e) => {
                 println!("Proof url: {}", &proof_url);
                 println!("Proof: {proof:?}");
                 return Err("Error parsing proof".into());
@@ -120,16 +196,20 @@ impl LocalAuditor<'_> {
             data: proof.into_iter().collect(),
         };
 
+        self.proof_storage.store_audit_blob(&audit_blob)?;
+
         Ok(audit_blob)
     }
 
     fn get_audit_blob_at_epoch(&mut self, epoch: u64) -> Result<AuditBlob, Box<dyn Error>> {
-        if !self.proofs.contains_key(&epoch)  {
-            let audit_blob = self._get_audit_blob_at_epoch_no_cache(epoch)?;
-            self.proofs.insert(epoch, audit_blob);
+        if self.proofs.contains_key(&epoch)  {
+            return Ok(self.proofs.get(&epoch).unwrap().clone());
         }
 
-        Ok(self.proofs.get(&epoch).unwrap().clone())
+        let audit_blob = self._get_audit_blob_at_epoch_from_internet(epoch)?;
+        self.proofs.insert(epoch, audit_blob.clone());
+
+        Ok(audit_blob)
     }
 }
 
@@ -420,7 +500,6 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
     }
     */
 
-    let mut rng = rand::rng();
 
     let root1 = azks_db.get_node(NodeLabel::root()).await?.unwrap();
     let root2 = azks_db2.get_node(NodeLabel::root()).await?.unwrap();
@@ -435,6 +514,7 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
     println!("Prev Left value: {:?}", left2.latest_node.hash);
 
     // Test some node
+    //let mut rng = rand::rng();
     //let test_node = proof.inserted[(rng.random::<u32>() as usize) % proof.inserted.len()];
     //let test_node = proof.unchanged_nodes[(rng.random::<u32>() as usize) % proof.unchanged_nodes.len()];
     let test_node = proof.unchanged_nodes[0];
