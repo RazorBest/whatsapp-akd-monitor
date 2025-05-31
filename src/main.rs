@@ -56,46 +56,57 @@ struct ProofMeta {
 
 impl ProofMeta {
     fn from_audit_blob(audit_blob: &AuditBlob) -> Self {
-        return Self{
+        Self{
             epoch: audit_blob.name.epoch,
             previous_hash: audit_blob.name.previous_hash,
             current_hash: audit_blob.name.current_hash,
-        };
+        }
+    }
+
+    fn to_audit_blob(&self, data: Vec<u8>) -> AuditBlob {
+        AuditBlob{
+            name: AuditBlobName{
+                epoch: self.epoch,
+                previous_hash: self.previous_hash,
+                current_hash: self.current_hash,
+            },
+            data: data,
+        }
     }
 }
 
 struct ProofStorage {
-    proofs_info: Option<HashMap<u64, ProofMeta>>,
+    proofs_info: HashMap<u64, ProofMeta>,
 }
 
 impl ProofStorage {
-    fn read_storage_meta(&mut self) -> Result<HashMap<u64, ProofMeta>, Box<dyn Error>> {
+    fn read_storage_meta() -> Result<HashMap<u64, ProofMeta>, Box<dyn Error>> {
         let info_path = Path::new(PROOFS_STORE_DIR).join(PROOFS_META_FILE);
         let text = fs::read_to_string(info_path)?;
         Ok(serde_json::from_str(&text)?)
     }
 
     fn new() -> Self {
-        return Self{proofs_info: None};
+        Self{proofs_info: ProofStorage::read_storage_meta().unwrap_or_default()}
     }
 
-    fn get_proofs_info(&mut self) -> &mut HashMap<u64, ProofMeta> {
-        if self.proofs_info.is_none() {
-            self.proofs_info = Some(self.read_storage_meta().unwrap_or_default())
-        }
+    fn append_proof_info(&mut self, epoch: u64, proof_info: ProofMeta) {
+        self.proofs_info.insert(epoch, proof_info);
+    }
 
-        return self.proofs_info.as_mut().unwrap();
+    fn get_proof_info_at_epoch(&self, epoch: u64) -> Option<&ProofMeta> {
+        self.proofs_info.get(&epoch)
     }
 
     fn store_proofs_info(&mut self) -> Result<(), Box<dyn Error>> {
         let info_path = Path::new(PROOFS_STORE_DIR).join(PROOFS_META_FILE);
-        let text = serde_json::to_string(self.get_proofs_info()).unwrap();
+        let text = serde_json::to_string(&self.proofs_info).unwrap();
         fs::write(info_path, text)?;
         Ok(())
     }
 
     fn stored_file_name_for_audit_proof(&self, epoch: u64) -> String{
-        return format!("proof_wt_{}", epoch);
+        format!("proof_wt_{}", epoch)
     }
 
     fn store_audit_blob(&mut self, audit_blob: &AuditBlob) -> Result<(), Box<dyn Error>> {
@@ -108,11 +119,21 @@ impl ProofStorage {
 
 
         let proof_info = ProofMeta::from_audit_blob(audit_blob);
-        let proofs_info = self.get_proofs_info();
-        proofs_info.insert(epoch, proof_info);
+        self.append_proof_info(epoch, proof_info);
         self.store_proofs_info()?;
 
         Ok(())
+    }
+
+    fn read_audit_blob(&self, epoch: u64) -> Option<AuditBlob> {
+        let proof_info = self.get_proof_info_at_epoch(epoch)?;
+
+        let _ = fs::create_dir_all(PROOFS_STORE_DIR);
+        let file_name = self.stored_file_name_for_audit_proof(proof_info.epoch);
+        let file_path = Path::new(PROOFS_STORE_DIR).join(file_name);
+        let data: Vec<u8> = fs::read(file_path).ok()?;
+
+        Some(proof_info.to_audit_blob(data))
     }
 }
 
@@ -186,7 +207,6 @@ impl LocalAuditor<'_> {
             Ok(value) => value,
             Err(_e) => {
                 println!("Proof url: {}", &proof_url);
-                println!("Proof: {proof:?}");
                 return Err("Error parsing proof".into());
             }
         };
@@ -204,6 +224,10 @@ impl LocalAuditor<'_> {
     fn get_audit_blob_at_epoch(&mut self, epoch: u64) -> Result<AuditBlob, Box<dyn Error>> {
         if self.proofs.contains_key(&epoch)  {
             return Ok(self.proofs.get(&epoch).unwrap().clone());
+        }
+
+        if let Some(audit_blob) = self.proof_storage.read_audit_blob(epoch) {
+            return Ok(audit_blob);
         }
 
         let audit_blob = self._get_audit_blob_at_epoch_from_internet(epoch)?;
@@ -479,7 +503,7 @@ async fn process_azks(epoch: u64, prev_hash: [u8; 32], curr_hash: [u8; 32],
         }
     }
 
-    println!("New elements: {}", new_elems.len());
+    println!("New elements: {}/{}", new_elems.len(), proof.inserted.len());
 
     return Ok(EpochComputedStats {
         new_inserted_nodes_count: new_elems.len() as u64,
@@ -635,9 +659,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let end = curr_epoch - 11;
     while curr_epoch > end {
+        println!("Getting proof at epoch {curr_epoch}");
         let audit_blob = auditor.get_audit_blob_at_epoch(curr_epoch)?;
         let (epoch, prev_hash, curr_hash, local_proof) = audit_blob.decode().map_err(|_e| "Error")?;
 
+        println!("Getting proof at epoch {}", curr_epoch - 1);
         let prev_audit_blob = auditor.get_audit_blob_at_epoch(curr_epoch - 1)?;
         let (_epoch, _prev_hash, _curr_hash, local_proof2) = prev_audit_blob.decode().map_err(|_e| "Error")?;
 
