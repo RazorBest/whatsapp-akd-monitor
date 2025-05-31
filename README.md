@@ -12,6 +12,7 @@ The protocol is meant to be Zero Knowledge. However, it's not fully ZK. The proo
 The data structure behind this protocol is a compressed Merkle tree. In the protocol, the server can only add new nodes to the tree. The auditor's role is to check that these nodes are inserted correctly in the tree.
 
 Based on the specification in the paper, and assuming how WhatsApp works, we have the following assumptions:
+
     - Each node stores a user's public key
     - If a user changes its public key, a new node will be added for that public key
     - Existing nodes never change value
